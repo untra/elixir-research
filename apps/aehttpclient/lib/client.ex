@@ -16,8 +16,9 @@ defmodule Aehttpclient.Client do
     get(uri <> "/info", :info)
   end
 
-  @spec get_block({term(), term()}) :: {:ok, %Block{}} | :error
+  @spec get_block({term(), binary()}) :: {:ok, %Block{}} | {:error, binary()}
   def get_block({uri, hash}) do
+    hash = Base.encode16(hash)
     case get(uri <> "/block/#{hash}", :block) do
       {:ok, serialized_block} ->
         {:ok, Serialization.block(serialized_block, :deserialize)}
@@ -25,6 +26,10 @@ defmodule Aehttpclient.Client do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  def get_pool_txs(uri) do
+    get(uri <> "/pool_txs", :pool_txs)
   end
 
   @spec send_block(%Block{}, list(binary())) :: :ok
@@ -53,7 +58,7 @@ defmodule Aehttpclient.Client do
 
   @spec get_peers(term()) :: {:ok, list()}
   def get_peers(uri) do
-    get(uri <> "/peers", :peers)
+    get(uri <> "/peers")
   end
 
   @spec get_and_add_peers(term()) :: :ok
@@ -62,8 +67,9 @@ defmodule Aehttpclient.Client do
     Enum.each(peers, fn{peer, _} -> Peers.add_peer(peer) end)
   end
 
+  @spec get_account_balance({binary(), binary()}) :: {:ok, binary()} | :error
   def get_account_balance({uri, acc}) do
-    get(uri <> "/balance/#{acc}", :balance)
+    get(uri <> "/balance/#{acc}")
   end
 
   @spec get_account_txs({term(), term()}) :: {:ok, list()} | :error
@@ -71,7 +77,7 @@ defmodule Aehttpclient.Client do
     get(uri <> "/tx_pool/#{acc}", :acc_txs)
   end
 
-  defp get(uri, identifier) do
+  defp get(uri, identifier \\ :default) do
     case(HTTPoison.get(uri, [{"peer_port", get_local_port()}, {"nonce", Peers.get_peer_nonce()}])) do
       {:ok, %{body: body, headers: headers, status_code: 200}} ->
         case(identifier) do
@@ -88,18 +94,24 @@ defmodule Aehttpclient.Client do
             response = Poison.decode!(body,
               as: [%SignedTx{data: %TxData{}}], keys: :atoms!)
             {:ok, response}
-          _ ->
+          :pool_txs ->
+            response =
+              body
+              |> Poison.decode!(as: [%SignedTx{data: %TxData{}}], keys: :atoms!)
+              |> Enum.map(fn(tx) -> Serialization.tx(tx, :deserialize) end)
+            {:ok, response}
+          :default ->
             json_response(body)
         end
       {:ok, %HTTPoison.Response{status_code: 404}} ->
-        :error
+        {:error, "Response 404"}
       {:ok, %HTTPoison.Response{status_code: 400}} ->
-        :error
+        {:error, "Response 400"}
       {:error, %HTTPoison.Error{}} ->
-        :error
+        {:error, "HTTPPoison Error"}
       unexpected ->
         Logger.error(fn -> "unexpected client result " <> Kernel.inspect(unexpected) end)
-        :error
+        {:error, "Unexpected error"}
     end
   end
 
@@ -114,7 +126,7 @@ defmodule Aehttpclient.Client do
   end
 
   defp get_local_port() do
-    Aehttpserver.Endpoint |> :sys.get_state() |> elem(3) |> Enum.at(2)
+    Aehttpserver.Web.Endpoint |> :sys.get_state() |> elem(3) |> Enum.at(2)
     |> elem(3) |> elem(2) |> Enum.at(1) |> List.keyfind(:http, 0)
     |> elem(1) |> Enum.at(0) |> elem(1)
   end

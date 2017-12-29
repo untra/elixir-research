@@ -5,6 +5,7 @@ defmodule Aecore.Peers.Sync do
   alias Aecore.Peers.Worker, as: Peers
   alias Aehttpclient.Client, as: HttpClient
   alias Aecore.Chain.Worker, as: Chain
+  alias Aecore.Txs.Pool.Worker, as: Pool
   alias Aecore.Chain.BlockValidation
   alias Aeutil.Serialization
 
@@ -39,13 +40,26 @@ defmodule Aecore.Peers.Sync do
     GenServer.call(__MODULE__, :add_valid_peer_blocks_to_chain)
   end
 
+  def add_unknown_peer_pool_txs(peers) do
+    peer_uris = peers |> Map.values() |> Enum.map(fn(%{uri: uri}) -> uri end)
+    Enum.each(peer_uris, fn(peer) ->
+      case HttpClient.get_pool_txs(peer) do
+        {:ok, deserialized_pool_txs} ->
+          Enum.each(deserialized_pool_txs,
+            fn(tx) -> Pool.add_transaction(tx) end)
+        :error ->
+          Logger.error("Couldn't get pool from peer")
+      end
+    end)
+  end
+
   def handle_call(:get_state, _from, state) do
     {:reply, state, state}
   end
 
   def handle_call({:add_block_to_state, block_hash, block}, _from, state) do
     updated_state =
-      case Chain.has_block?(Base.encode16(block_hash)) do
+      case Chain.has_block?(block_hash) do
         true ->
           state
         false ->
@@ -63,8 +77,9 @@ defmodule Aecore.Peers.Sync do
   end
 
   def handle_call({:ask_peers_for_unknown_blocks, peers}, _from, state) do
-    state = Enum.reduce(peers, state, fn ({_, %{uri: uri, latest_block: latest_block}}, acc) ->
-        Map.merge(acc, check_peer_block(uri, latest_block, %{}))
+    state = Enum.reduce(peers, state, fn ({_, %{uri: uri, latest_block: top_block_hash}}, acc) ->
+        {:ok, top_hash_decoded} = Base.decode16(top_block_hash)
+        Map.merge(acc, check_peer_block(uri, top_hash_decoded, %{}))
       end)
 
     {:reply, :ok, state}
@@ -135,7 +150,8 @@ defmodule Aecore.Peers.Sync do
         {:ok, list} ->
           Enum.concat(acc, Enum.map(Map.values(list),
                                     fn(%{"uri" => uri}) -> uri end))
-        :error ->
+        {:error, message} ->
+          Logger.error(fn -> "Couldn't get peers from #{peer}: #{message}" end)
           acc
       end
     end)
@@ -167,8 +183,7 @@ defmodule Aecore.Peers.Sync do
   # (that means we can add this chain to ours)
   defp build_chain(state, block, chain) do
     has_parent_block_in_state = Map.has_key?(state, block.header.prev_hash)
-    has_parent_in_chain =
-      block.header.prev_hash == BlockValidation.block_header_hash(Chain.latest_block().header)
+    has_parent_in_chain = Chain.has_block?(block.header.prev_hash)
     cond do
       has_parent_block_in_state ->
         build_chain(state, state[block.header.prev_hash], [block | chain])
@@ -203,8 +218,8 @@ defmodule Aecore.Peers.Sync do
               peer_block_hash =
                 BlockValidation.block_header_hash(deserialized_block.header)
 
-              if(block_hash == Base.encode16(peer_block_hash)) do
-                check_peer_block(peer_uri, Serialization.hex_binary(deserialized_block.header.prev_hash, :serialize),
+              if(block_hash == peer_block_hash) do
+                check_peer_block(peer_uri, deserialized_block.header.prev_hash,
                   Map.put(state, peer_block_hash, deserialized_block))
               else
                 state

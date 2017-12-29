@@ -111,7 +111,7 @@ defmodule Aecore.Peers.Worker do
   end
 
   def handle_call(:is_chain_synced, _from, %{peers: peers} = state) do
-    local_latest_block_height = Chain.latest_block().header.height
+    local_latest_block_height = Chain.top_height()
     peer_uris = peers
       |> Map.values()
       |> Enum.map(fn(%{uri: uri}) -> uri end)
@@ -224,6 +224,7 @@ defmodule Aecore.Peers.Worker do
               Logger.info(fn -> "Added #{uri} to the peer list" end)
               Sync.ask_peers_for_unknown_blocks(updated_peers)
               Sync.add_valid_peer_blocks_to_chain()
+              Sync.add_unknown_peer_pool_txs(updated_peers)
               {:reply, :ok, %{state | peers: updated_peers}}
             else
               Logger.debug(fn -> "Max peers reached. #{uri} not added" end)
